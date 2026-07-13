@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: drp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: drp_user
+      POSTGRES_PASSWORD: drp_pass
+      POSTGRES_DB: drp_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drp_user -d drp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: drp_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://drp_user:drp_pass@postgres:5432/drp_db?schema=public"
+      PORT: 4000
+      # Add GEMINI_API_KEY here or in a .env file in Phase 3
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+    ports:
+      - "4000:4000"
+    # In dev, mount source so you can rebuild without restarting Docker
+    volumes:
+      - ./backend/src:/app/src:ro
+    env_file:
+      - .env
+
+volumes:
+  postgres_data:

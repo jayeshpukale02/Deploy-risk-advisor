@@ -1,0 +1,49 @@
+// Prisma schema for Deploy Risk Advisor
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A single code deployment event, including risk scoring results.
+model Deploy {
+  id             String    @id @default(cuid())
+  repo           String
+  commitSha      String
+  author         String
+  /// Relative file paths changed in this commit
+  filesChanged   String[]
+  linesAdded     Int
+  linesDeleted   Int
+  /// Percentage-point change in test coverage (positive = improved)
+  coverageDelta  Float?
+  deployedAt     DateTime
+  /// Final risk score 0–100 (deterministic base, or LLM-refined if available)
+  riskScore      Int       @default(0)
+  /// Breakdown of each deterministic signal as a JSON object
+  riskSignals    Json      @default("{}")
+  /// Plain-English explanation from the LLM synthesis layer (Phase 3+)
+  llmExplanation String?
+  /// "safe" | "incident" | "rolled_back" — populated post-deploy (Phase 6+)
+  outcome        String?
+  createdAt      DateTime  @default(now())
+
+  @@index([repo, deployedAt])
+  @@index([riskScore])
+}
+
+/// Configurable sensitive path patterns per repository.
+/// Patterns use glob-style matching (e.g. "auth/**", "payments/**").
+model SensitivePath {
+  id      String @id @default(cuid())
+  repo    String
+  pattern String
+
+  @@unique([repo, pattern])
+  @@index([repo])
+}

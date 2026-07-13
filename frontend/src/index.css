@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens */
+:root {
+  --brand-gradient: linear-gradient(135deg, #4f6ef7 0%, #7c3aed 100%);
+}
+
+body {
+  @apply bg-gray-950 text-gray-100 font-sans antialiased;
+  min-height: 100vh;
+}
