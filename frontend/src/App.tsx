@@ -70,20 +70,12 @@ export default function App() {
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             {/* Logo mark */}
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-gradient-to-br from-brand-500 to-purple-600 shadow-lg shadow-brand-500/30">
-              <svg
-                className="w-5 h-5 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
+            <div className="w-8 h-8 rounded-lg overflow-hidden shadow-lg shadow-brand-500/30 ring-1 ring-brand-500/40">
+              <img
+                src="/logo.png"
+                alt="Deploy Risk Advisor logo"
+                className="w-full h-full object-contain"
+              />
             </div>
             <span className="font-bold text-white tracking-tight text-lg">
               Deploy Risk Advisor
@@ -107,22 +99,14 @@ export default function App() {
       <main className="flex-1 flex flex-col items-center justify-center px-6 py-20">
         <div className="max-w-2xl w-full text-center space-y-8">
           {/* Glow ring */}
-          <div className="relative inline-flex">
-            <div className="absolute inset-0 rounded-full bg-brand-500/20 blur-3xl" />
-            <div className="relative w-20 h-20 rounded-2xl flex items-center justify-center bg-gradient-to-br from-brand-500 to-purple-600 shadow-2xl shadow-brand-500/40 mx-auto">
-              <svg
-                className="w-10 h-10 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"
-                />
-              </svg>
+          <div className="relative inline-flex mx-auto">
+            <div className="absolute inset-0 rounded-full bg-brand-500/25 blur-3xl scale-150" />
+            <div className="relative w-24 h-24 rounded-2xl overflow-hidden shadow-2xl shadow-brand-500/50 ring-2 ring-brand-500/30">
+              <img
+                src="/logo.png"
+                alt="Deploy Risk Advisor"
+                className="w-full h-full object-contain"
+              />
             </div>
           </div>
 

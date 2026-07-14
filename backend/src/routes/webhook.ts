@@ -1,6 +1,8 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import prisma from "../db/prisma";
+import { scoreDeployment } from "../scoring/engine";
 
 const router = Router();
 
@@ -29,11 +31,13 @@ const DeployPayloadSchema = z.object({
 // ---------------------------------------------------------------------------
 
 /**
- * Accepts a deploy payload, persists it to the DB.
+ * Accepts a deploy payload, scores it deterministically, and persists it.
  *
- * In Phase 1 the record is written with riskScore=0 and riskSignals={}.
- * Phase 2 will plug the deterministic scoring engine in here.
- * Phase 3 will plug the LLM synthesis layer in after that.
+ * Flow:
+ *   1. Validate payload (Zod)
+ *   2. Run deterministic scoring engine → per-signal breakdown + composite score
+ *   3. Persist Deploy record with real risk scores
+ *   4. (Phase 3 will add LLM synthesis here, after step 2)
  */
 router.post("/deploy", async (req: Request, res: Response) => {
   const parseResult = DeployPayloadSchema.safeParse(req.body);
@@ -47,8 +51,23 @@ router.post("/deploy", async (req: Request, res: Response) => {
   }
 
   const data = parseResult.data;
+  const deployedAt = new Date(data.deployedAt);
 
   try {
+    // ── Phase 2: Deterministic scoring ──────────────────────────────────────
+    const riskSignals = await scoreDeployment({
+      repo: data.repo,
+      author: data.author,
+      filesChanged: data.filesChanged,
+      linesAdded: data.linesAdded,
+      linesDeleted: data.linesDeleted,
+      coverageDelta: data.coverageDelta,
+      deployedAt,
+    });
+
+    // ── Phase 3 slot: LLM synthesis will go here ─────────────────────────────
+    // const llmResult = await explanationProvider.explainRisk(riskSignals, data.diff ?? "");
+
     const deploy = await prisma.deploy.create({
       data: {
         repo: data.repo,
@@ -58,28 +77,28 @@ router.post("/deploy", async (req: Request, res: Response) => {
         linesAdded: data.linesAdded,
         linesDeleted: data.linesDeleted,
         coverageDelta: data.coverageDelta ?? null,
-        deployedAt: new Date(data.deployedAt),
-        // Phase 1: placeholder — scoring added in Phase 2
-        riskScore: 0,
-        riskSignals: {},
-        llmExplanation: null,
+        deployedAt,
+        riskScore: riskSignals.compositeScore,
+        riskSignals: riskSignals as unknown as Prisma.InputJsonValue,
+        llmExplanation: null, // Phase 3
         outcome: null,
       },
     });
 
-    console.log(`[webhook] New deploy stored: ${deploy.id} (${data.repo})`);
+    console.log(
+      `[webhook] Deploy scored: ${deploy.id} | repo=${data.repo} | score=${riskSignals.compositeScore}`
+    );
 
     res.status(201).json({
       id: deploy.id,
       repo: deploy.repo,
       commitSha: deploy.commitSha,
-      riskScore: deploy.riskScore,
-      message:
-        "Deploy recorded. Scoring will be applied once the scoring engine is initialised (Phase 2).",
+      riskScore: riskSignals.compositeScore,
+      riskSignals,
     });
   } catch (err) {
-    console.error("[webhook] DB error:", err);
-    res.status(500).json({ error: "Failed to store deploy record" });
+    console.error("[webhook] Error:", err);
+    res.status(500).json({ error: "Failed to score and store deploy record" });
   }
 });
 
