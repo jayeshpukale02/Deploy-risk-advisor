@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "../db/prisma";
 import { scoreDeployment } from "../scoring/engine";
+import { getExplanationProvider } from "../llm";
 
 const router = Router();
 
@@ -31,13 +32,14 @@ const DeployPayloadSchema = z.object({
 // ---------------------------------------------------------------------------
 
 /**
- * Accepts a deploy payload, scores it deterministically, and persists it.
+ * Accepts a deploy payload, scores it deterministically, then refines with LLM.
  *
  * Flow:
  *   1. Validate payload (Zod)
- *   2. Run deterministic scoring engine → per-signal breakdown + composite score
- *   3. Persist Deploy record with real risk scores
- *   4. (Phase 3 will add LLM synthesis here, after step 2)
+ *   2. Deterministic scoring engine → per-signal breakdown + composite score
+ *   3. LLM synthesis → refined score + plain-English explanation
+ *      (falls back to deterministic score if Gemini is unavailable)
+ *   4. Persist Deploy record
  */
 router.post("/deploy", async (req: Request, res: Response) => {
   const parseResult = DeployPayloadSchema.safeParse(req.body);
@@ -65,9 +67,13 @@ router.post("/deploy", async (req: Request, res: Response) => {
       deployedAt,
     });
 
-    // ── Phase 3 slot: LLM synthesis will go here ─────────────────────────────
-    // const llmResult = await explanationProvider.explainRisk(riskSignals, data.diff ?? "");
+    // ── Phase 3: LLM synthesis ───────────────────────────────────────────────
+    const llmResult = await getExplanationProvider().explainRisk(
+      riskSignals,
+      data.diff ?? ""
+    );
 
+    const finalScore = llmResult.refinedScore;
     const deploy = await prisma.deploy.create({
       data: {
         repo: data.repo,
@@ -78,23 +84,26 @@ router.post("/deploy", async (req: Request, res: Response) => {
         linesDeleted: data.linesDeleted,
         coverageDelta: data.coverageDelta ?? null,
         deployedAt,
-        riskScore: riskSignals.compositeScore,
+        riskScore: finalScore,
         riskSignals: riskSignals as unknown as Prisma.InputJsonValue,
-        llmExplanation: null, // Phase 3
+        llmExplanation: llmResult.explanation,
         outcome: null,
       },
     });
 
     console.log(
-      `[webhook] Deploy scored: ${deploy.id} | repo=${data.repo} | score=${riskSignals.compositeScore}`
+      `[webhook] Deploy processed: ${deploy.id} | repo=${data.repo} | deterministicScore=${riskSignals.compositeScore} | finalScore=${finalScore} | llmSource=${llmResult.source}`
     );
 
     res.status(201).json({
       id: deploy.id,
       repo: deploy.repo,
       commitSha: deploy.commitSha,
-      riskScore: riskSignals.compositeScore,
+      riskScore: finalScore,
+      deterministicScore: riskSignals.compositeScore,
       riskSignals,
+      llmExplanation: llmResult.explanation,
+      llmSource: llmResult.source,
     });
   } catch (err) {
     console.error("[webhook] Error:", err);
