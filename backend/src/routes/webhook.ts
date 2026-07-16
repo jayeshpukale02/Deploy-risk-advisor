@@ -1,11 +1,53 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
+import { timingSafeEqual, createHash } from "crypto";
 import { Prisma } from "@prisma/client";
 import prisma from "../db/prisma";
 import { scoreDeployment } from "../scoring/engine";
 import { getExplanationProvider } from "../llm";
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// Webhook secret auth
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates the X-Webhook-Secret header against WEBHOOK_SECRET env var.
+ * Uses timing-safe comparison to prevent timing-based secret enumeration.
+ * If WEBHOOK_SECRET is not set, auth is skipped (open for local dev).
+ */
+function validateWebhookSecret(req: Request, res: Response): boolean {
+  const secret = process.env.WEBHOOK_SECRET;
+  if (!secret) return true; // not configured — allow (local dev only)
+
+  const provided = req.headers["x-webhook-secret"];
+  if (!provided || typeof provided !== "string") {
+    res.status(401).json({ error: "Missing X-Webhook-Secret header" });
+    return false;
+  }
+
+  try {
+    const expectedBuf = Buffer.from(
+      createHash("sha256").update(secret).digest("hex")
+    );
+    const providedBuf = Buffer.from(
+      createHash("sha256").update(provided).digest("hex")
+    );
+    if (
+      expectedBuf.length !== providedBuf.length ||
+      !timingSafeEqual(expectedBuf, providedBuf)
+    ) {
+      res.status(401).json({ error: "Invalid webhook secret" });
+      return false;
+    }
+  } catch {
+    res.status(401).json({ error: "Invalid webhook secret" });
+    return false;
+  }
+
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Validation schema
@@ -42,6 +84,9 @@ const DeployPayloadSchema = z.object({
  *   4. Persist Deploy record
  */
 router.post("/deploy", async (req: Request, res: Response) => {
+  // ── Phase 4: secret auth ──────────────────────────────────────────────────
+  if (!validateWebhookSecret(req, res)) return;
+
   const parseResult = DeployPayloadSchema.safeParse(req.body);
 
   if (!parseResult.success) {

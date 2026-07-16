@@ -1,0 +1,218 @@
+name: Deploy Risk Advisor
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fires on every push to main (i.e. when a PR is merged).
+# Collects deployment metadata, computes a coverage delta if available,
+# and POSTs the full payload to the DRP webhook endpoint.
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  risk-score:
+    name: Score Deployment Risk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # ── 1. Checkout with two commits so we can diff HEAD~1 ─────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need HEAD and HEAD~1 to compute the diff
+
+      # ── 2. Collect changed files ────────────────────────────────────────────
+      - name: Collect changed files
+        id: changed
+        run: |
+          # Guard: if this is the very first commit, diff against empty tree
+          PARENT=$(git rev-parse --verify HEAD~1 2>/dev/null || echo "")
+          if [ -z "$PARENT" ]; then
+            DIFF_BASE="$(git hash-object -t tree /dev/null)"
+          else
+            DIFF_BASE="HEAD~1"
+          fi
+
+          # Files changed (newline-separated, JSON-safe via jq)
+          FILES=$(git diff --name-only "$DIFF_BASE" HEAD | jq -R . | jq -sc .)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+          # Line counts
+          ADDED=$(git diff --numstat "$DIFF_BASE" HEAD \
+            | awk '{sum+=$1} END {print sum+0}')
+          DELETED=$(git diff --numstat "$DIFF_BASE" HEAD \
+            | awk '{sum+=$2} END {print sum+0}')
+          echo "lines_added=$ADDED"   >> "$GITHUB_OUTPUT"
+          echo "lines_deleted=$DELETED" >> "$GITHUB_OUTPUT"
+
+          # Full diff for LLM context (hard-capped at 8 KB to keep payload sane)
+          DIFF=$(git diff "$DIFF_BASE" HEAD | head -c 8192 | jq -Rs .)
+          echo "diff=$DIFF" >> "$GITHUB_OUTPUT"
+
+      # ── 3. Coverage delta (optional — skip gracefully if not available) ─────
+      - name: Set up Node.js (coverage step)
+        if: ${{ hashFiles('package.json') != '' && contains(toJson(fromJson('["test:coverage","coverage"]')), '') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Restore previous coverage
+        id: prev-coverage
+        uses: actions/cache@v4
+        with:
+          path: .drp-prev-coverage.json
+          key: drp-coverage-${{ github.ref_name }}
+          restore-keys: drp-coverage-
+
+      - name: Generate current coverage
+        id: coverage
+        continue-on-error: true  # never block a deploy over missing coverage
+        run: |
+          COVERAGE_DELTA="null"
+
+          # Detect coverage summary — Jest/Istanbul standard output location
+          COVERAGE_FILE="coverage/coverage-summary.json"
+
+          if [ -f "package.json" ] && npm run --silent 2>/dev/null | grep -q "test:coverage"; then
+            npm ci --silent 2>/dev/null || true
+            npm run test:coverage --silent 2>/dev/null || true
+          fi
+
+          if [ -f "$COVERAGE_FILE" ]; then
+            CURRENT=$(node -e "
+              const s = require('./$COVERAGE_FILE');
+              const t = s.total;
+              const pct = (t.lines.pct + t.statements.pct + t.functions.pct + t.branches.pct) / 4;
+              process.stdout.write(String(Math.round(pct * 100) / 100));
+            " 2>/dev/null || echo "")
+
+            if [ -n "$CURRENT" ]; then
+              echo "{\"coverage\":$CURRENT}" > .drp-current-coverage.json
+
+              if [ -f ".drp-prev-coverage.json" ]; then
+                PREV=$(node -e "process.stdout.write(String(require('./.drp-prev-coverage.json').coverage))")
+                COVERAGE_DELTA=$(node -e "process.stdout.write(String(Math.round(($CURRENT - $PREV) * 100) / 100))")
+              fi
+
+              # Persist current as the next run's previous
+              cp .drp-current-coverage.json .drp-prev-coverage.json
+            fi
+          fi
+
+          echo "delta=$COVERAGE_DELTA" >> "$GITHUB_OUTPUT"
+
+      - name: Save coverage for next run
+        if: steps.coverage.outputs.delta != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .drp-prev-coverage.json
+          key: drp-coverage-${{ github.ref_name }}
+
+      # ── 4. Build and POST payload ───────────────────────────────────────────
+      - name: Post to Deploy Risk Advisor
+        env:
+          DRP_WEBHOOK_URL: ${{ secrets.DRP_WEBHOOK_URL }}
+          DRP_WEBHOOK_SECRET: ${{ secrets.DRP_WEBHOOK_SECRET }}
+        run: |
+          # Validate required secrets are set
+          if [ -z "$DRP_WEBHOOK_URL" ]; then
+            echo "::warning::DRP_WEBHOOK_URL secret is not set — skipping risk scoring"
+            exit 0
+          fi
+
+          REPO="${{ github.repository }}"
+          COMMIT_SHA="${{ github.sha }}"
+          AUTHOR="${{ github.event.head_commit.author.email }}"
+          DEPLOYED_AT="${{ github.event.head_commit.timestamp }}"
+          FILES='${{ steps.changed.outputs.files }}'
+          LINES_ADDED="${{ steps.changed.outputs.lines_added }}"
+          LINES_DELETED="${{ steps.changed.outputs.lines_deleted }}"
+          COVERAGE_DELTA="${{ steps.coverage.outputs.delta }}"
+          DIFF='${{ steps.changed.outputs.diff }}'
+
+          # Guard: if filesChanged is empty array, add a placeholder
+          if [ "$FILES" = "[]" ] || [ -z "$FILES" ]; then
+            echo "::warning::No changed files detected — skipping risk scoring"
+            exit 0
+          fi
+
+          # Build JSON payload
+          PAYLOAD=$(jq -n \
+            --arg repo          "$REPO" \
+            --arg commitSha     "$COMMIT_SHA" \
+            --arg author        "$AUTHOR" \
+            --argjson files     "$FILES" \
+            --argjson linesAdded    "${LINES_ADDED:-0}" \
+            --argjson linesDeleted  "${LINES_DELETED:-0}" \
+            --argjson coverageDelta "${COVERAGE_DELTA:-null}" \
+            --arg deployedAt    "$DEPLOYED_AT" \
+            --arg diff          "$DIFF" \
+            '{
+              repo:          $repo,
+              commitSha:     $commitSha,
+              author:        $author,
+              filesChanged:  $files,
+              linesAdded:    $linesAdded,
+              linesDeleted:  $linesDeleted,
+              coverageDelta: $coverageDelta,
+              deployedAt:    $deployedAt,
+              diff:          $diff
+            }')
+
+          echo "Payload size: $(echo "$PAYLOAD" | wc -c) bytes"
+          echo "Files changed: $(echo "$FILES" | jq length)"
+
+          # POST to webhook
+          HTTP_STATUS=$(curl -s -o /tmp/drp_response.json -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${DRP_WEBHOOK_SECRET}" \
+            --max-time 30 \
+            -d "$PAYLOAD" \
+            "${DRP_WEBHOOK_URL}/webhook/deploy")
+
+          echo "HTTP status: $HTTP_STATUS"
+          cat /tmp/drp_response.json | jq . 2>/dev/null || cat /tmp/drp_response.json
+
+          # Surface risk score in the workflow summary
+          RISK_SCORE=$(cat /tmp/drp_response.json | jq -r '.riskScore // "N/A"' 2>/dev/null)
+          EXPLANATION=$(cat /tmp/drp_response.json | jq -r '.llmExplanation // ""' 2>/dev/null)
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🚦 Deploy Risk Score: ${RISK_SCORE}/100" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$EXPLANATION" ] && [ "$EXPLANATION" != "null" ]; then
+            echo "**AI Analysis:** ${EXPLANATION}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          SIGNALS=$(cat /tmp/drp_response.json | jq -r '
+            .riskSignals |
+            "| Signal | Score |\n|--------|-------|\n" +
+            "| Sensitive paths | \(.sensitivePathScore) |\n" +
+            "| Coverage delta  | \(.coverageDeltaScore) |\n" +
+            "| Change size     | \(.changeSizeScore) |\n" +
+            "| Author familiarity | \(.authorFamiliarityScore) |\n" +
+            "| Deploy timing   | \(.deployTimingScore) |\n" +
+            "| Historical correlation | \(.historicalCorrelationScore) |"
+          ' 2>/dev/null || echo "")
+
+          if [ -n "$SIGNALS" ]; then
+            echo "### Signal Breakdown" >> "$GITHUB_STEP_SUMMARY"
+            echo "$SIGNALS" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Fail the step if the webhook returned an error (not 2xx)
+          if [[ "$HTTP_STATUS" -lt 200 || "$HTTP_STATUS" -ge 300 ]]; then
+            echo "::error::Webhook returned HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          # Emit a workflow warning if risk is high (≥75)
+          if [ "$RISK_SCORE" != "N/A" ] && [ "$RISK_SCORE" -ge 75 ] 2>/dev/null; then
+            echo "::warning::⚠️ HIGH RISK DEPLOY — score ${RISK_SCORE}/100. Review AI explanation before proceeding."
+          fi
