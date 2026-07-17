@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import webhookRouter from "./routes/webhook";
+import deploysRouter from "./routes/deploys";
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 app.use("/webhook", webhookRouter);
+app.use("/deploys", deploysRouter);
 
 // 404 handler
 app.use((_req: Request, res: Response) => {
@@ -45,8 +47,9 @@ const PORT = parseInt(process.env.PORT ?? "4000", 10);
 
 app.listen(PORT, () => {
   console.log(`🚀 Deploy Risk Advisor backend running on port ${PORT}`);
-  console.log(`   Health: http://localhost:${PORT}/health`);
-  console.log(`   Webhook: POST http://localhost:${PORT}/webhook/deploy`);
+  console.log(`   Health:   GET  http://localhost:${PORT}/health`);
+  console.log(`   Deploys:  GET  http://localhost:${PORT}/deploys`);
+  console.log(`   Webhook:  POST http://localhost:${PORT}/webhook/deploy`);
 });
 
 export default app;
